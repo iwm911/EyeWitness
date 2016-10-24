@@ -12,7 +12,11 @@ from netaddr import IPAddress
 from netaddr.core import AddrFormatError
 from urlparse import urlparse
 from login_module import checkCreds
-
+import OpenSSL
+import ssl
+from pyasn1.type import univ, constraint, char, namedtype, tag
+from pyasn1.codec.der.decoder import decode
+from pyasn1.error import PyAsn1Error
 
 class XML_Parser(xml.sax.ContentHandler):
 
@@ -696,3 +700,58 @@ def open_file_input(cli_parsed):
     else:
         print '[*] No report files found to open, perhaps no hosts were successful'
         return False
+
+
+class _GeneralName(univ.Choice):
+    # Copied from https://github.com/theprincy/sslchecker
+    # We are only interested in dNSNames. We use a default handler to ignore
+    # other types.
+    # TODO: We should also handle iPAddresses.
+    componentType = namedtype.NamedTypes(
+        namedtype.NamedType('dNSName', char.IA5String().subtype(
+            implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 2)
+        )
+        ),
+    )
+
+
+class _GeneralNames(univ.SequenceOf):
+    # Copied from https://github.com/theprincy/sslchecker
+    componentType = _GeneralName()
+    sizeSpec = univ.SequenceOf.sizeSpec + \
+        constraint.ValueSizeConstraint(1, 1024)
+
+
+class Certificate(object):
+    # Based on https://github.com/theprincy/sslchecker
+    def __init__(self,ip,port=443):
+        cert = ssl.get_server_certificate((ip, port))
+        self.x509 = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, cert)
+
+    def subject(self):
+        return self.x509.get_subject().get_components()
+
+    def cn(self):
+        c = None
+        for i in self.subject():
+            if i[0] == b"CN":
+                c = i[1]
+        if type(c) == bytes:
+            c = c.decode('utf-8')
+        return c
+
+
+    def altnames(self):
+        altnames = []
+        for i in range(self.x509.get_extension_count()):
+            ext = self.x509.get_extension(i)
+            if ext.get_short_name() == b"subjectAltName":
+                try:
+                    dec = decode(ext.get_data(), asn1Spec=_GeneralNames())
+                except PyAsn1Error:
+                    continue
+                for i in dec[0]:
+                    altnames.append(i[0].asOctets())
+        if type(altnames) == bytes:
+            altnames = altnames.decode('utf-8')
+        return altnames
